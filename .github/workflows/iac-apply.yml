@@ -1,0 +1,174 @@
+#  Copyright (c) 2026 Contributors to the Eclipse Foundation
+#
+#  See the NOTICE file(s) distributed with this work for additional
+#  information regarding copyright ownership.
+#
+#  This program and the accompanying materials are made available under the
+#  terms of the Apache License, Version 2.0 which is available at
+#  https://www.apache.org/licenses/LICENSE-2.0.
+#
+#  Unless required by applicable law or agreed to in writing, software
+#  distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+#  WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+#  License for the specific language governing permissions and limitations
+#  under the License.
+#
+#  SPDX-License-Identifier: Apache-2.0
+
+name: iac-apply
+
+# Chained: runs when iac-plan completes successfully on main.
+# Promotion: apply-dev -> apply-test -> apply-prod. dev applies directly;
+# test and prod are gated by their environments (= required reviewers =>
+# manual approval). Only affected cloud/stage combos run.
+on:
+  workflow_run:
+    workflows: ["iac-plan"]
+    types: [completed]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+env:
+  TOFU_VERSION: 1.10.1
+  TG_VERSION: 0.82.3
+  ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+  ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+  ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+  ARM_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+
+jobs:
+  load:
+    if: >
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.head_branch == 'main')
+    runs-on: ubuntu-latest
+    outputs:
+      test: ${{ steps.l.outputs.test }}
+      dev: ${{ steps.l.outputs.dev }}
+      prod: ${{ steps.l.outputs.prod }}
+      has_test: ${{ steps.l.outputs.has_test }}
+      has_dev: ${{ steps.l.outputs.has_dev }}
+      has_prod: ${{ steps.l.outputs.has_prod }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.ref }}
+          fetch-depth: 0
+      - name: Download affected matrix (from iac-plan run)
+        if: ${{ github.event_name == 'workflow_run' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # download-artifact@v4 can flake with "Requires authentication" on
+          # cross-run downloads; retry, then let the next step recompute on failure.
+          for i in 1 2 3 4 5; do
+            rm -rf _dl
+            if gh run download "${{ github.event.workflow_run.id }}" -n affected -D _dl; then
+              f="$(find _dl -name affected.json | head -1)"
+              [ -n "$f" ] && cp "$f" affected.json && exit 0
+            fi
+            echo "download attempt $i failed; retrying in 5s"; sleep 5
+          done
+          echo "could not download the affected artifact; the next step will recompute"
+      - id: l
+        run: |
+          if [ ! -f affected.json ]; then
+            bash .github/scripts/affected.sh "" "" > affected.json
+          fi
+          TEST="$(jq -c '{include: [.include[] | select(.stage=="test")]}' affected.json)"
+          DEV="$(jq -c '{include: [.include[] | select(.stage=="dev")]}' affected.json)"
+          PROD="$(jq -c '{include: [.include[] | select(.stage=="prod")]}' affected.json)"
+          echo "test=$TEST" >> "$GITHUB_OUTPUT"
+          echo "dev=$DEV" >> "$GITHUB_OUTPUT"
+          echo "prod=$PROD" >> "$GITHUB_OUTPUT"
+          { [ "$(printf '%s' "$TEST" | jq '.include | length')" -gt 0 ] && echo "has_test=true" || echo "has_test=false"; } >> "$GITHUB_OUTPUT"
+          { [ "$(printf '%s' "$DEV" | jq '.include | length')" -gt 0 ] && echo "has_dev=true" || echo "has_dev=false"; } >> "$GITHUB_OUTPUT"
+          { [ "$(printf '%s' "$PROD" | jq '.include | length')" -gt 0 ] && echo "has_prod=true" || echo "has_prod=false"; } >> "$GITHUB_OUTPUT"
+
+  apply-dev:
+    needs: load
+    if: needs.load.outputs.has_dev == 'true'
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.load.outputs.dev) }}
+    runs-on: ubuntu-latest
+    environment: dev
+    env:
+      CLOUD: ${{ matrix.cloud }}
+      STAGE: ${{ matrix.stage }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.ref }}
+      - uses: opentofu/setup-opentofu@v2
+        with:
+          tofu_version: ${{ env.TOFU_VERSION }}
+      - uses: gruntwork-io/terragrunt-action@v3
+        with:
+          tg_version: ${{ env.TG_VERSION }}
+          tofu_version: ${{ env.TOFU_VERSION }}
+          tg_command: --version
+      - name: Apply dev (all stacks)
+        run: make apply-all
+
+  apply-test:
+    needs: [load, apply-dev]
+    if: >
+      always() &&
+      needs.load.outputs.has_test == 'true' &&
+      (needs.apply-dev.result == 'success' || needs.apply-dev.result == 'skipped')
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.load.outputs.test) }}
+    runs-on: ubuntu-latest
+    environment: test
+    env:
+      CLOUD: ${{ matrix.cloud }}
+      STAGE: ${{ matrix.stage }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.ref }}
+      - uses: opentofu/setup-opentofu@v2
+        with:
+          tofu_version: ${{ env.TOFU_VERSION }}
+      - uses: gruntwork-io/terragrunt-action@v3
+        with:
+          tg_version: ${{ env.TG_VERSION }}
+          tofu_version: ${{ env.TOFU_VERSION }}
+          tg_command: --version
+      - name: Apply test (all stacks)
+        run: make apply-all
+
+  apply-prod:
+    needs: [load, apply-test]
+    if: >
+      always() &&
+      needs.load.outputs.has_prod == 'true' &&
+      (needs.apply-test.result == 'success' || needs.apply-test.result == 'skipped')
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.load.outputs.prod) }}
+    runs-on: ubuntu-latest
+    environment: prod
+    env:
+      CLOUD: ${{ matrix.cloud }}
+      STAGE: ${{ matrix.stage }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.ref }}
+      - uses: opentofu/setup-opentofu@v2
+        with:
+          tofu_version: ${{ env.TOFU_VERSION }}
+      - uses: gruntwork-io/terragrunt-action@v3
+        with:
+          tg_version: ${{ env.TG_VERSION }}
+          tofu_version: ${{ env.TOFU_VERSION }}
+          tg_command: --version
+      - name: Apply prod (all stacks)
+        run: make apply-all

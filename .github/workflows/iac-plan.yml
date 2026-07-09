@@ -1,0 +1,151 @@
+#  Copyright (c) 2026 Contributors to the Eclipse Foundation
+#
+#  See the NOTICE file(s) distributed with this work for additional
+#  information regarding copyright ownership.
+#
+#  This program and the accompanying materials are made available under the
+#  terms of the Apache License, Version 2.0 which is available at
+#  https://www.apache.org/licenses/LICENSE-2.0.
+#
+#  Unless required by applicable law or agreed to in writing, software
+#  distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+#  WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+#  License for the specific language governing permissions and limitations
+#  under the License.
+#
+#  SPDX-License-Identifier: Apache-2.0
+
+name: iac-plan
+
+# Chained: runs when iac-validate completes successfully.
+on:
+  workflow_run:
+    workflows: ["iac-validate"]
+    types: [completed]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+  pull-requests: write
+
+env:
+  TOFU_VERSION: 1.10.1
+  TG_VERSION: 0.82.3
+  ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+  ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+  ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+  ARM_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+
+jobs:
+  load:
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.l.outputs.matrix }}
+      has_changes: ${{ steps.l.outputs.has }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.ref }}
+          fetch-depth: 0
+      - name: Download affected matrix (from iac-validate run)
+        if: ${{ github.event_name == 'workflow_run' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # download-artifact@v4 can flake with "Requires authentication" on
+          # cross-run downloads; retry, then let the next step recompute on failure.
+          for i in 1 2 3 4 5; do
+            rm -rf _dl
+            if gh run download "${{ github.event.workflow_run.id }}" -n affected -D _dl; then
+              f="$(find _dl -name affected.json | head -1)"
+              [ -n "$f" ] && cp "$f" affected.json && exit 0
+            fi
+            echo "download attempt $i failed; retrying in 5s"; sleep 5
+          done
+          echo "could not download the affected artifact; the next step will recompute"
+      - id: l
+        run: |
+          if [ ! -f affected.json ]; then
+            bash .github/scripts/affected.sh "" "" > affected.json
+          fi
+          MATRIX="$(cat affected.json)"
+          echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
+          LEN="$(printf '%s' "$MATRIX" | jq '.include | length')"
+          { [ "$LEN" -gt 0 ] && echo "has=true" || echo "has=false"; } >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: affected
+          path: affected.json
+          retention-days: 1
+
+  plan:
+    needs: load
+    if: needs.load.outputs.has_changes == 'true'
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.load.outputs.matrix) }}
+    runs-on: ubuntu-latest
+    env:
+      CLOUD: ${{ matrix.cloud }}
+      STAGE: ${{ matrix.stage }}
+      TG_DIR: iac/live/${{ matrix.cloud }}/${{ matrix.stage }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.ref }}
+      - uses: opentofu/setup-opentofu@v2
+        with:
+          tofu_version: ${{ env.TOFU_VERSION }}
+      - uses: gruntwork-io/terragrunt-action@v3
+        with:
+          tg_version: ${{ env.TG_VERSION }}
+          tofu_version: ${{ env.TOFU_VERSION }}
+          tg_command: --version
+      - name: Plan (all stacks)
+        id: plan
+        run: |
+          set -o pipefail
+          make plan-all 2>&1 | tee plan_raw.txt
+      - name: Build PR comment
+        if: ${{ always() && github.event.workflow_run.event == 'pull_request' }}
+        env:
+          PLAN_OUTCOME: ${{ steps.plan.outcome }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
+          TRIGGER_ACTOR: ${{ github.event.workflow_run.actor.login }}
+          WORKFLOW: ${{ github.workflow }}
+        run: |
+          {
+            echo '## OpenTofu plan (`run-all`)'
+            echo
+            echo '| | |'
+            echo '|---|---|'
+            echo "| Status | \`${PLAN_OUTCOME}\` |"
+            echo "| Cloud / Stage | \`${CLOUD}\` / \`${STAGE}\` |"
+            echo "| Stacks | \`${TG_DIR}\` |"
+            echo "| Branch | \`${HEAD_BRANCH}\` |"
+            echo "| Commit | \`${HEAD_SHA}\` |"
+            echo "| Triggered by | @${TRIGGER_ACTOR} |"
+            echo "| Workflow | \`${WORKFLOW}\` |"
+            echo
+            echo '### Per-stack summary'
+            echo '```'
+            grep -hE 'Plan: [0-9]+ to add|No changes\.' plan_raw.txt || echo '(no summary lines found — see full plan)'
+            echo '```'
+            echo
+            echo '<details><summary>Show full plan</summary>'
+            echo
+            echo '```'
+            tail -c 60000 plan_raw.txt
+            echo '```'
+            echo '</details>'
+          } > plan_comment.md
+      - name: Comment plan on PR
+        if: ${{ always() && github.event.workflow_run.event == 'pull_request' }}
+        uses: marocchino/sticky-pull-request-comment@v2
+        with:
+          header: tofu-plan-${{ matrix.cloud }}-${{ matrix.stage }}
+          number: ${{ github.event.workflow_run.pull_requests[0].number }}
+          path: plan_comment.md

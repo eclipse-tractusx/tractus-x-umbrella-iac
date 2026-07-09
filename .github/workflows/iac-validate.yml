@@ -1,0 +1,139 @@
+#  Copyright (c) 2026 Contributors to the Eclipse Foundation
+#
+#  See the NOTICE file(s) distributed with this work for additional
+#  information regarding copyright ownership.
+#
+#  This program and the accompanying materials are made available under the
+#  terms of the Apache License, Version 2.0 which is available at
+#  https://www.apache.org/licenses/LICENSE-2.0.
+#
+#  Unless required by applicable law or agreed to in writing, software
+#  distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+#  WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+#  License for the specific language governing permissions and limitations
+#  under the License.
+#
+#  SPDX-License-Identifier: Apache-2.0
+
+name: iac-validate
+
+on:
+  pull_request:
+    paths:
+      - "iac/**"
+      - ".github/workflows/iac-validate.yml"
+  push:
+    branches: [main]
+    paths:
+      - "iac/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  TOFU_VERSION: 1.10.1
+  TG_VERSION: 0.82.3
+  TFLINT_VERSION: v0.52.0
+  ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+  ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+  ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+  ARM_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+
+jobs:
+  detect:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.d.outputs.matrix }}
+      has_changes: ${{ steps.d.outputs.has }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - id: d
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            BASE="${{ github.event.pull_request.base.sha }}"; HEAD="${{ github.sha }}"
+          elif [ "${{ github.event_name }}" = "push" ]; then
+            BASE="${{ github.event.before }}"; HEAD="${{ github.sha }}"
+            git cat-file -e "${BASE}^{commit}" 2>/dev/null || BASE=""
+          else
+            BASE=""; HEAD=""
+          fi
+          MATRIX="$(bash .github/scripts/affected.sh "$BASE" "$HEAD")"
+          echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
+          LEN="$(printf '%s' "$MATRIX" | jq '.include | length')"
+          { [ "$LEN" -gt 0 ] && echo "has=true" || echo "has=false"; } >> "$GITHUB_OUTPUT"
+          printf '%s' "$MATRIX" > affected.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: affected
+          path: affected.json
+          retention-days: 1
+
+  validate:
+    needs: detect
+    if: needs.detect.outputs.has_changes == 'true'
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.detect.outputs.matrix) }}
+    runs-on: ubuntu-latest
+    env:
+      CLOUD: ${{ matrix.cloud }}
+      STAGE: ${{ matrix.stage }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: opentofu/setup-opentofu@v2
+        with:
+          tofu_version: ${{ env.TOFU_VERSION }}
+      - uses: gruntwork-io/terragrunt-action@v3
+        with:
+          tg_version: ${{ env.TG_VERSION }}
+          tofu_version: ${{ env.TOFU_VERSION }}
+          tg_command: --version
+      - uses: terraform-linters/setup-tflint@v6
+        with:
+          tflint_version: ${{ env.TFLINT_VERSION }}
+      - name: Format check
+        run: make fmt-check
+      - name: TFLint
+        run: make lint
+      - name: Trivy (IaC misconfig)
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: config
+          scan-ref: iac/
+          severity: HIGH,CRITICAL
+          exit-code: "1"
+          trivyignores: .trivyignore
+      - name: Checkov (compliance)
+        uses: bridgecrewio/checkov-action@v12
+        with:
+          directory: iac/
+          framework: terraform
+          config_file: .checkov.yaml
+      - name: Validate (all stacks)
+        run: make validate-all
+
+  test:
+    needs: [detect, validate]
+    if: needs.detect.outputs.has_changes == 'true'
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.detect.outputs.matrix) }}
+    runs-on: ubuntu-latest
+    env:
+      CLOUD: ${{ matrix.cloud }}
+      STAGE: ${{ matrix.stage }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: opentofu/setup-opentofu@v2
+        with:
+          tofu_version: ${{ env.TOFU_VERSION }}
+      - uses: gruntwork-io/terragrunt-action@v3
+        with:
+          tg_version: ${{ env.TG_VERSION }}
+          tofu_version: ${{ env.TOFU_VERSION }}
+          tg_command: --version
+      - name: Test (all modules)
+        run: make test-all

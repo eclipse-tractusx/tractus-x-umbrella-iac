@@ -1,0 +1,17 @@
+.terragrunt-cache/
+.terraform/
+.terraform.lock.hcl
+*.tfstate
+*.tfstate.*
+crash.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+.env
+tmp/
+.azure-tmp/
+
+# CI/local plan capture artifacts
+plan_raw.txt
+plan_comment.md
