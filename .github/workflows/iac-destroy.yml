@@ -55,11 +55,11 @@ jobs:
       CLOUD: ${{ inputs.cloud }}
       STAGE: ${{ inputs.stage }}
     steps:
-      - uses: actions/checkout@v6
-      - uses: opentofu/setup-opentofu@v2
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+      - uses: opentofu/setup-opentofu@a1320f892987e89d278cc92dc5adc984fb93aca4 # v2.0.2
         with:
           tofu_version: ${{ env.TOFU_VERSION }}
-      - uses: gruntwork-io/terragrunt-action@v3
+      - uses: gruntwork-io/terragrunt-action@8c1d96b76d445fd2e41475a3f0b63dcd1d9cc077 # v3.4.1
         with:
           tg_version: ${{ env.TG_VERSION }}
           tofu_version: ${{ env.TOFU_VERSION }}
