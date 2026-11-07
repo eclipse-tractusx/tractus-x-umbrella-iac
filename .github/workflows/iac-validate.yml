@@ -47,7 +47,7 @@ jobs:
       matrix: ${{ steps.d.outputs.matrix }}
       has_changes: ${{ steps.d.outputs.has }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           fetch-depth: 0
       - id: d
@@ -65,7 +65,7 @@ jobs:
           LEN="$(printf '%s' "$MATRIX" | jq '.include | length')"
           { [ "$LEN" -gt 0 ] && echo "has=true" || echo "has=false"; } >> "$GITHUB_OUTPUT"
           printf '%s' "$MATRIX" > affected.json
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: affected
           path: affected.json
@@ -82,16 +82,16 @@ jobs:
       CLOUD: ${{ matrix.cloud }}
       STAGE: ${{ matrix.stage }}
     steps:
-      - uses: actions/checkout@v6
-      - uses: opentofu/setup-opentofu@v2
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+      - uses: opentofu/setup-opentofu@a1320f892987e89d278cc92dc5adc984fb93aca4 # v2.0.2
         with:
           tofu_version: ${{ env.TOFU_VERSION }}
-      - uses: gruntwork-io/terragrunt-action@v3
+      - uses: gruntwork-io/terragrunt-action@8c1d96b76d445fd2e41475a3f0b63dcd1d9cc077 # v3.4.1
         with:
           tg_version: ${{ env.TG_VERSION }}
           tofu_version: ${{ env.TOFU_VERSION }}
           tg_command: --version
-      - uses: terraform-linters/setup-tflint@v6
+      - uses: terraform-linters/setup-tflint@6ffdbaa3be476b3431f7275c26966ef32ff60337 # v6.3.2
         with:
           tflint_version: ${{ env.TFLINT_VERSION }}
       - name: Format check
@@ -99,7 +99,7 @@ jobs:
       - name: TFLint
         run: make lint
       - name: Trivy (IaC misconfig)
-        uses: aquasecurity/trivy-action@v0.36.0
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           scan-type: config
           scan-ref: iac/
@@ -107,7 +107,7 @@ jobs:
           exit-code: "1"
           trivyignores: .trivyignore
       - name: Checkov (compliance)
-        uses: bridgecrewio/checkov-action@v12
+        uses: bridgecrewio/checkov-action@45edc9d8856b664db2ec251f5f8632361f0a67aa # v12.3139.0
         with:
           directory: iac/
           framework: terraform
@@ -126,11 +126,11 @@ jobs:
       CLOUD: ${{ matrix.cloud }}
       STAGE: ${{ matrix.stage }}
     steps:
-      - uses: actions/checkout@v6
-      - uses: opentofu/setup-opentofu@v2
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+      - uses: opentofu/setup-opentofu@a1320f892987e89d278cc92dc5adc984fb93aca4 # v2.0.2
         with:
           tofu_version: ${{ env.TOFU_VERSION }}
-      - uses: gruntwork-io/terragrunt-action@v3
+      - uses: gruntwork-io/terragrunt-action@8c1d96b76d445fd2e41475a3f0b63dcd1d9cc077 # v3.4.1
         with:
           tg_version: ${{ env.TG_VERSION }}
           tofu_version: ${{ env.TOFU_VERSION }}
