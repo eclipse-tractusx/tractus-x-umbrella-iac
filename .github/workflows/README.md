@@ -16,9 +16,9 @@ manual    -> iac-destroy.yml (pick cloud + stage) -> destroy-all         (gated 
 |---|---|---|
 | `iac-validate.yml` | PR + push `main` | `detect` -> `validate` -> `test` |
 | `iac-plan.yml` | on `iac-validate` success | `load` -> `plan` (comments plan on PRs) |
-| `iac-apply.yml` | on `iac-plan` success, `head_branch == main` | `load` -> `apply-dev` -> `apply-test` -> `apply-prod` |
-| `iac-bootstrap.yml` | **manual only** (`workflow_dispatch`) | `bootstrap` (creates the state backend) |
-| `iac-destroy.yml` | **manual only** (`workflow_dispatch`) | `destroy` (destroys ALL stacks of the selected cloud/stage) |
+| `iac-apply.yml` | on `iac-plan` success for a change from `main`; manual on `main` | `load` -> `apply-dev` -> `apply-test` -> `apply-prod` |
+| `iac-bootstrap.yml` | **manual only** (`workflow_dispatch`) on `main` | `bootstrap` (creates the state backend) |
+| `iac-destroy.yml` | **manual only** (`workflow_dispatch`) on `main` | `destroy` (destroys ALL stacks of the selected cloud/stage) |
 
 The CI calls the **same `make` targets** used locally (single source of truth). Only Trivy and
 Checkov run as dedicated marketplace actions.
@@ -42,6 +42,13 @@ emits a matrix of only the impacted combos:
 The matrix is uploaded as the `affected` artifact and consumed downstream across the `workflow_run`
 chain (`actions/download-artifact` with `run-id`). If nothing is affected, downstream jobs are
 skipped.
+
+## Apply gate
+
+`workflow_run` runs always report the default branch as `head_branch`, so `iac-apply` can't tell a
+PR-triggered chain from a push to `main` by that field. `iac-plan` therefore sets its run name to
+`iac-plan [<event> <branch> <repo>] <sha>`; `iac-apply` only runs for `push`/`workflow_dispatch` on
+`main` of this repo, verifies `<sha>` is on `main`, and applies exactly that commit.
 
 ## Promotion dev -> test -> prod
 

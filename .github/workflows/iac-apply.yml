@@ -17,7 +17,7 @@
 
 name: iac-apply
 
-# Chained: runs when iac-plan completes successfully on main.
+# Chained: runs when iac-plan completes successfully for a change from main.
 # Promotion: apply-dev -> apply-test -> apply-prod. dev applies directly;
 # test and prod are gated by their environments (= required reviewers =>
 # manual approval). Only affected cloud/stage combos run.
@@ -41,12 +41,17 @@ env:
 
 jobs:
   load:
+    # workflow_run.head_branch is always main here (iac-plan runs on the default
+    # branch), so gate on the origin encoded in iac-plan's run-name instead.
     if: >
-      github.event_name == 'workflow_dispatch' ||
-      (github.event.workflow_run.conclusion == 'success' &&
-       github.event.workflow_run.head_branch == 'main')
+      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') ||
+      (github.event_name == 'workflow_run' &&
+       github.event.workflow_run.conclusion == 'success' &&
+       (startsWith(github.event.workflow_run.display_title, format('iac-plan [push main {0}] ', github.repository)) ||
+        startsWith(github.event.workflow_run.display_title, format('iac-plan [workflow_dispatch main {0}] ', github.repository))))
     runs-on: ubuntu-latest
     outputs:
+      sha: ${{ steps.sha.outputs.sha }}
       test: ${{ steps.l.outputs.test }}
       dev: ${{ steps.l.outputs.dev }}
       prod: ${{ steps.l.outputs.prod }}
@@ -54,10 +59,31 @@ jobs:
       has_dev: ${{ steps.l.outputs.has_dev }}
       has_prod: ${{ steps.l.outputs.has_prod }}
     steps:
+      - name: Resolve planned commit
+        id: sha
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PLAN_TITLE: ${{ github.event.workflow_run.display_title }}
+          DISPATCH_SHA: ${{ github.sha }}
+        run: |
+          if [ "$EVENT_NAME" = "workflow_run" ]; then
+            SHA="${PLAN_TITLE##* }"
+          else
+            SHA="$DISPATCH_SHA"
+          fi
+          [[ "$SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::invalid sha '$SHA'"; exit 1; }
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@v6
         with:
-          ref: ${{ github.event.workflow_run.head_sha || github.ref }}
+          ref: ${{ steps.sha.outputs.sha }}
           fetch-depth: 0
+      # The title only carries a ref *name*; a tag called "main" would pass the gate.
+      - name: Verify commit is on main
+        env:
+          SHA: ${{ steps.sha.outputs.sha }}
+        run: |
+          git fetch --no-tags origin main
+          git merge-base --is-ancestor "$SHA" origin/main || { echo "::error::$SHA is not on main"; exit 1; }
       - name: Download affected matrix (from iac-plan run)
         if: ${{ github.event_name == 'workflow_run' }}
         env:
@@ -103,7 +129,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
         with:
-          ref: ${{ github.event.workflow_run.head_sha || github.ref }}
+          ref: ${{ needs.load.outputs.sha }}
       - uses: opentofu/setup-opentofu@v2
         with:
           tofu_version: ${{ env.TOFU_VERSION }}
@@ -132,7 +158,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
         with:
-          ref: ${{ github.event.workflow_run.head_sha || github.ref }}
+          ref: ${{ needs.load.outputs.sha }}
       - uses: opentofu/setup-opentofu@v2
         with:
           tofu_version: ${{ env.TOFU_VERSION }}
@@ -161,7 +187,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
         with:
-          ref: ${{ github.event.workflow_run.head_sha || github.ref }}
+          ref: ${{ needs.load.outputs.sha }}
       - uses: opentofu/setup-opentofu@v2
         with:
           tofu_version: ${{ env.TOFU_VERSION }}
